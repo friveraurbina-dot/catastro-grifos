@@ -1568,7 +1568,43 @@ function severidadDe(obs){
   return 'mediano';
 }
 
-/* ---------------- CARGA DEL EXCEL ---------------- */
+/* ---------------- CRUCE CON EL CATÁLOGO ---------------- */
+/* Normaliza el código para tolerar diferencias de formato:
+   "LS89" ≡ "LS089", "lam 002" ≡ "LAM002", "PA-31" ≡ "PA31" */
+function normCod(c){
+  const s = String(c || '').trim().toUpperCase().replace(/[\s\-_.]/g,'');
+  const m = s.match(/^([A-ZÑ]+)0*(\d+)$/);
+  return m ? m[1] + m[2] : s;
+}
+let _idxCatalogo = null;
+function idxCatalogo(){
+  if(_idxCatalogo) return _idxCatalogo;
+  _idxCatalogo = {exacto:{}, norm:{}};
+  CATALOGO_GRIFOS.forEach(g=>{
+    _idxCatalogo.exacto[String(g.codigoGrifo).toUpperCase()] = g;
+    const n = normCod(g.codigoGrifo);
+    if(!_idxCatalogo.norm[n]) _idxCatalogo.norm[n] = g;
+  });
+  return _idxCatalogo;
+}
+/* Devuelve {grifo, metodo} — metodo: 'codigo' | 'codigo_normalizado' | null */
+function ubicarGrifo(codigo){
+  const idx = idxCatalogo();
+  const ex = idx.exacto[String(codigo || '').trim().toUpperCase()];
+  if(ex) return {grifo: ex, metodo: 'codigo'};
+  const nm = idx.norm[normCod(codigo)];
+  if(nm) return {grifo: nm, metodo: 'codigo_normalizado'};
+  return {grifo: null, metodo: null};
+}
+const METODO_LABEL = {
+  codigo: 'Código exacto',
+  codigo_normalizado: 'Código normalizado',
+  manual: 'Asignado manualmente'
+};
+
+/* ---------------- LECTURA DEL EXCEL (sin guardar) ---------------- */
+let PEND = null;   // { archivo, empresa, periodo, registros: [] }
+
 async function handleExcelPR036(evt){
   const file = evt.target.files[0];
   if(!file) return;
@@ -1586,16 +1622,14 @@ async function handleExcelPR036(evt){
       throw new Error('No se reconoce el formato PR036 (faltan las columnas codigoGrifo / periodo).');
     }
 
-    const empresaArchivo = (file.name.match(/SA[LM]/i) || ['—'])[0].toUpperCase();
+    const empresa = (file.name.match(/SA[LM]/i) || ['—'])[0].toUpperCase();
     const registros = [];
-    let sinCatalogo = 0;
 
     filas.forEach(f=>{
       const cod = String(f.codigoGrifo || '').trim();
-      if(!cod) return;
+      if(!cod || cod.toLowerCase() === 'null') return;
       const per = String(f.periodo || '').trim();
-      const g   = CATALOGO_GRIFOS.find(x => x.codigoGrifo.toUpperCase() === cod.toUpperCase());
-      if(!g) sinCatalogo++;
+      const u = ubicarGrifo(cod);
 
       const datos = {};
       COLUMNAS_PR036.forEach(c=>{
@@ -1608,14 +1642,16 @@ async function handleExcelPR036(evt){
       registros.push({
         id: per + '_' + cod.toUpperCase(),
         periodo: per,
-        empresa: empresaArchivo,
+        empresa: empresa,
         codigoGrifo: cod,
         codigoComuna: String(f.codigoComuna || ''),
-        comuna: g ? g.comuna : null,
-        direccion: g ? g.Ubicacion : null,
-        lat: g ? g.lat : null,
-        lng: g ? g.lng : null,
-        enCatalogo: !!g,
+        comuna:    u.grifo ? u.grifo.comuna : null,
+        direccion: u.grifo ? u.grifo.Ubicacion : null,
+        lat:       u.grifo ? u.grifo.lat : null,
+        lng:       u.grifo ? u.grifo.lng : null,
+        grifoCatalogo: u.grifo ? u.grifo.codigoGrifo : null,
+        metodoUbicacion: u.metodo,
+        enCatalogo: !!u.grifo,
         fechaInspeccion: datos.fechaInspeccion,
         observaciones: obs,
         severidad: severidadDe(obs),
@@ -1626,22 +1662,173 @@ async function handleExcelPR036(evt){
       });
     });
 
-    set('Guardando <strong>' + registros.length + '</strong> inspecciones en la base compartida…');
-    await guardarInspecciones(registros);
-
-    const conObs = registros.filter(r=>r.severidad !== 'ok').length;
-    set('✔ <strong>' + registros.length + '</strong> inspecciones cargadas (' + empresaArchivo +
-        ' · período ' + registros[0].periodo + ') · <strong>' + conObs + '</strong> con observaciones' +
-        (sinCatalogo ? ' · <span style="color:#C8334D;">' + sinCatalogo + ' sin ubicación en el catálogo</span>' : ''));
-    toast(registros.length + ' inspecciones cargadas');
+    PEND = {archivo: file.name, empresa: empresa, periodo: registros[0].periodo, registros: registros};
     evt.target.value = '';
-    await cargarInspecciones(true);
-    renderInspecciones();
+    renderPrevisualizacion();
   }catch(e){
     console.error(e);
     set('<span style="color:#C8334D;">No se pudo procesar el archivo: ' + (e.message || e) + '</span>');
     toast('Error al leer el archivo');
     evt.target.value = '';
+  }
+}
+
+/* ---------------- PREVISUALIZACIÓN ---------------- */
+function renderPrevisualizacion(){
+  if(!PEND) return renderInspecciones();
+  const regs = PEND.registros;
+  const sinUbicar = regs.filter(r=>!r.enCatalogo);
+  const conObs    = regs.filter(r=>r.severidad !== 'ok');
+  const porMetodo = {};
+  regs.forEach(r=> porMetodo[r.metodoUbicacion || 'sin'] = (porMetodo[r.metodoUbicacion || 'sin']||0)+1);
+  const c = {inmediato:0, corto:0, mediano:0};
+  conObs.forEach(r=> c[r.severidad]++);
+  const yaExiste = INSPECCIONES.filter(i=>i.periodo === PEND.periodo && i.empresa === PEND.empresa).length;
+
+  const opcionesCat = CATALOGO_GRIFOS.map(g=>`<option value="${g.codigoGrifo}">${g.codigoGrifo} — ${g.Ubicacion} (${g.comuna})</option>`).join('');
+
+  document.getElementById('main').innerHTML = `<div class="page">
+    <div class="page-head">
+      <div><h1>Revisión previa</h1>
+      <p><strong>${PEND.archivo}</strong> · empresa ${PEND.empresa} · período ${PEND.periodo}</p></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="descartarPendiente()">Descartar</button>
+        <button class="btn btn-primary" id="btnGuardarInsp" onclick="guardarPendiente()">Guardar ${regs.length} inspecciones</button>
+      </div>
+    </div>
+
+    ${yaExiste ? `<div class="dl-zone" style="border-color:var(--senal);background:#fdf8ec;">
+      Ya hay <strong>${yaExiste}</strong> inspecciones guardadas de ${PEND.empresa} en el período ${PEND.periodo}.
+      Al guardar, <strong>se actualizan</strong> (mismo código = mismo registro), no se duplican.</div>` : ''}
+
+    <div class="kpi-row">
+      <div class="kpi"><div class="tab" style="background:var(--ink)"></div><div class="num">${regs.length}</div><div class="lbl">Inspecciones leídas</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--musgo)"></div><div class="num">${regs.length - sinUbicar.length}</div><div class="lbl">Georreferenciadas</div></div>
+      <div class="kpi"><div class="tab" style="background:${sinUbicar.length?'#C8334D':'#ccc'}"></div><div class="num">${sinUbicar.length}</div><div class="lbl">Sin ubicación</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--hidrante)"></div><div class="num">${c.inmediato}</div><div class="lbl">Operatividad directa</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--senal)"></div><div class="num">${c.corto}</div><div class="lbl">Operat. indirecta / Mecánica</div></div>
+      <div class="kpi"><div class="tab" style="background:#E7C948"></div><div class="num">${c.mediano}</div><div class="lbl">Señalética / Visibilidad</div></div>
+    </div>
+
+    <div class="panel">
+      <h3>Cruce con el catálogo de grifos</h3>
+      <p style="font-size:12.5px;color:var(--text-soft);margin:0 0 10px;">
+        Cada inspección toma su comuna, dirección y coordenadas desde el catálogo, cruzando por código.
+      </p>
+      <div class="detail-grid">
+        <div class="dg"><span>Cruzados por código exacto</span><span>${porMetodo.codigo || 0}</span></div>
+        <div class="dg"><span>Cruzados por código normalizado</span><span>${porMetodo.codigo_normalizado || 0}</span></div>
+        <div class="dg"><span>Asignados manualmente</span><span>${porMetodo.manual || 0}</span></div>
+        <div class="dg"><span>Sin ubicación</span><span>${sinUbicar.length}</span></div>
+      </div>
+    </div>
+
+    ${sinUbicar.length ? `
+    <div class="panel">
+      <h3>Grifos sin ubicación (${sinUbicar.length}) — asígnalos al catálogo</h3>
+      <p style="font-size:12.5px;color:var(--text-soft);margin:0 0 10px;">
+        Estos códigos no existen en el catálogo. Elige a qué grifo corresponden para georreferenciarlos, o déjalos sin ubicar (se guardarán igual, pero no saldrán en el mapa).
+      </p>
+      <datalist id="listaCatalogo">${opcionesCat}</datalist>
+      <div class="tbl-wrap">
+        <table class="insp">
+          <thead><tr><th>Código PR036</th><th>Comuna (cód.)</th><th>Observaciones</th><th>Asignar grifo del catálogo</th></tr></thead>
+          <tbody>
+            ${sinUbicar.map(r=>`
+              <tr>
+                <td class="mono">${r.codigoGrifo}</td>
+                <td class="mono">${r.codigoComuna}</td>
+                <td>${r.observaciones.length ? r.observaciones.map(o=>`<span class="badge ${o.severidad}">${o.texto}</span>`).join(' ') : '<span style="color:var(--text-soft)">—</span>'}</td>
+                <td>
+                  <input list="listaCatalogo" placeholder="Escribe el código…" style="width:230px;padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:12px;"
+                         onchange="asignarUbicacion('${r.id}', this.value, this)">
+                  <span id="ok_${r.id.replace(/[^A-Za-z0-9]/g,'')}" style="font-size:11.5px;color:var(--musgo);margin-left:6px;"></span>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+
+    ${conObs.length ? `
+    <div class="panel">
+      <h3>Observaciones detectadas (${conObs.length} grifos) — revisa la clasificación</h3>
+      <p style="font-size:12.5px;color:var(--text-soft);margin:0 0 10px;">
+        La clasificación se deduce del color del comentario (🔴 directa · 🟠 indirecta/mecánica · 🟡 señalética). Puedes corregirla antes de guardar.
+      </p>
+      <div class="tbl-wrap">
+        <table class="insp">
+          <thead><tr><th>Código</th><th>Dirección</th><th>Observación</th><th>Clasificación</th></tr></thead>
+          <tbody>
+            ${conObs.map(r=> r.observaciones.map((o,ix)=>`
+              <tr>
+                <td class="mono"><span class="sev-dot" style="background:${SEV_COLOR[o.severidad]}"></span>${r.codigoGrifo}</td>
+                <td>${r.direccion || '<span style="color:#C8334D">sin ubicación</span>'}</td>
+                <td>${o.texto}</td>
+                <td>
+                  <select onchange="reclasificar('${r.id}', ${ix}, this.value)" style="padding:5px 7px;border:1.5px solid var(--line);border-radius:6px;font-size:12px;">
+                    <option value="inmediato" ${o.severidad==='inmediato'?'selected':''}>Operatividad directa</option>
+                    <option value="corto" ${o.severidad==='corto'?'selected':''}>Operat. indirecta / Mecánica</option>
+                    <option value="mediano" ${o.severidad==='mediano'?'selected':''}>Señalética / Visibilidad</option>
+                  </select>
+                </td>
+              </tr>`).join('')).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : '<div class="panel"><h3>Observaciones</h3><p style="font-size:13px;color:var(--text-soft);margin:0;">Este archivo no trae observaciones registradas.</p></div>'}
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:30px;">
+      <button class="btn btn-ghost" onclick="descartarPendiente()">Descartar</button>
+      <button class="btn btn-primary" onclick="guardarPendiente()">Guardar ${regs.length} inspecciones en la base compartida</button>
+    </div>
+  </div>`;
+}
+
+function asignarUbicacion(idReg, codigoCat, input){
+  const r = PEND && PEND.registros.find(x=>x.id===idReg);
+  if(!r) return;
+  const g = CATALOGO_GRIFOS.find(x=>x.codigoGrifo.toUpperCase() === String(codigoCat).trim().toUpperCase());
+  const marca = document.getElementById('ok_' + idReg.replace(/[^A-Za-z0-9]/g,''));
+  if(!g){
+    if(marca) marca.innerHTML = '<span style="color:#C8334D">código no encontrado</span>';
+    return;
+  }
+  r.comuna = g.comuna; r.direccion = g.Ubicacion; r.lat = g.lat; r.lng = g.lng;
+  r.grifoCatalogo = g.codigoGrifo; r.metodoUbicacion = 'manual'; r.enCatalogo = true;
+  if(marca) marca.textContent = '✔ ' + g.Ubicacion;
+  if(input) input.style.borderColor = 'var(--musgo)';
+}
+
+function reclasificar(idReg, ix, valor){
+  const r = PEND && PEND.registros.find(x=>x.id===idReg);
+  if(!r || !r.observaciones[ix]) return;
+  r.observaciones[ix].severidad = valor;
+  r.severidad = severidadDe(r.observaciones);
+}
+
+function descartarPendiente(){
+  PEND = null;
+  toast('Carga descartada');
+  renderInspecciones();
+}
+
+async function guardarPendiente(){
+  if(!PEND) return;
+  const btn = document.getElementById('btnGuardarInsp');
+  if(btn){ btn.disabled = true; btn.textContent = 'Guardando…'; }
+  try{
+    await guardarInspecciones(PEND.registros);
+    const n = PEND.registros.length;
+    const conObs = PEND.registros.filter(r=>r.severidad!=='ok').length;
+    PEND = null;
+    await cargarInspecciones(true);
+    toast(n + ' inspecciones guardadas (' + conObs + ' con observación)');
+    renderInspecciones();
+  }catch(e){
+    console.error(e);
+    toast('No se pudieron guardar: ' + (e.message || e));
+    if(btn){ btn.disabled = false; btn.textContent = 'Reintentar guardado'; }
   }
 }
 
@@ -1701,6 +1888,7 @@ function inspFiltradas(){
 
 async function renderInspecciones(){
   const main = document.getElementById('main');
+  if(PEND){ renderPrevisualizacion(); return; }
   if(!inspCargadas){
     main.innerHTML = '<div class="loading">Cargando inspecciones…</div>';
     await cargarInspecciones();
@@ -1718,7 +1906,7 @@ async function renderInspecciones(){
   const zonaCarga = puedeCargar ? `
     <div class="dl-zone">
       <div style="margin-bottom:10px;">Carga el archivo <strong>Inspeccion Grifos_AAAAMM&lt;SAL|SAM&gt;.xlsx</strong> (formato PR036, 37 columnas).<br>
-      Volver a cargar el mismo período <strong>actualiza</strong> los registros, no los duplica.</div>
+      Verás una <strong>revisión previa</strong> con el cruce contra el catálogo y la clasificación, y decides si guardar.</div>
       <input type="file" id="inputPR036" accept=".xlsx,.xls" style="display:none" onchange="handleExcelPR036(event)">
       <button class="btn btn-primary btn-sm" onclick="document.getElementById('inputPR036').click()">Cargar Excel PR036</button>
       <div id="inspInfo" style="margin-top:10px;font-size:12.5px;"></div>
@@ -1880,7 +2068,10 @@ function verInspeccion(id){
     <h2>${i.codigoGrifo} <span class="badge ${i.severidad==='ok'?'resuelto':i.severidad}" style="vertical-align:middle;margin-left:6px;">${SEV_LABEL[i.severidad]}</span></h2>
     <p style="color:var(--text-soft);font-size:13px;margin:2px 0 14px;">
       ${i.direccion || 'Sin dirección en catálogo'} · ${i.comuna || '—'}<br>
-      Período <strong>${i.periodo}</strong> · Empresa ${i.empresa} · Inspección ${fmtFechaCorta(i.fechaInspeccion)}
+      Período <strong>${i.periodo}</strong> · Empresa ${i.empresa} · Inspección ${fmtFechaCorta(i.fechaInspeccion)}<br>
+      Ubicación: ${i.enCatalogo
+        ? (METODO_LABEL[i.metodoUbicacion] || 'Catálogo') + (i.grifoCatalogo && i.grifoCatalogo !== i.codigoGrifo ? ' → grifo ' + i.grifoCatalogo : '')
+        : '<span style="color:#C8334D;">sin ubicación en el catálogo</span>'}
     </p>
 
     ${i.observaciones && i.observaciones.length ? `
