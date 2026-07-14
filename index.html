@@ -524,48 +524,83 @@ async function saveHallazgos(){ guardarLocal(); render(); }
 
 /* ---------------- FOTOS ---------------- */
 /* Las fotos se guardan comprimidas dentro del documento del hallazgo
-   (plan gratuito de Firebase, sin necesidad de Storage ni tarjeta).
-   Se reducen a MAX_LADO_FOTO px y se baja la calidad hasta quedar
-   por debajo de MAX_BYTES_FOTO, con la fecha/hora estampada. */
-function procesarImagen(file){
+   (plan gratuito de Firebase, sin Storage ni tarjeta).
+   Se decodifican con createImageBitmap (soporta más formatos y respeta la
+   orientación EXIF) y, si el navegador no puede, se cae a <img>.
+   Formatos como HEIC/HEIF (iPhone por defecto) no los decodifica Chrome:
+   en ese caso se avisa al usuario con un mensaje claro. */
+
+function dibujarYComprimir(fuente, ancho, alto){
+  let w = ancho, h = alto;
+  const escala = Math.min(1, MAX_LADO_FOTO / Math.max(w, h));
+  w = Math.max(1, Math.round(w * escala));
+  h = Math.max(1, Math.round(h * escala));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(fuente, 0, 0, w, h);
+
+  const stamp = fmtDate(new Date());
+  const fontSize = Math.max(13, Math.round(w/32));
+  ctx.font = `600 ${fontSize}px IBM Plex Mono, monospace`;
+  const padding = fontSize*0.6;
+  const textW = ctx.measureText(stamp).width;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, h-fontSize-padding*2, textW+padding*2, fontSize+padding*2);
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(stamp, padding, h-fontSize/2-padding);
+
+  let q = CALIDAD_FOTO;
+  let dataUrl = canvas.toDataURL('image/jpeg', q);
+  while(dataUrl.length > MAX_BYTES_FOTO && q > 0.28){
+    q -= 0.08;
+    dataUrl = canvas.toDataURL('image/jpeg', q);
+  }
+  if(!dataUrl || dataUrl.length < 100) throw new Error('canvas-vacio');
+  return {dataUrl: dataUrl, bytes: dataUrl.length};
+}
+
+/* Plan B: decodificar con <img> + FileReader */
+function procesarConImg(file){
   return new Promise((resolve, reject)=>{
     const reader = new FileReader();
-    reader.onerror = reject;
+    reader.onerror = ()=> reject(new Error('lectura'));
     reader.onload = function(e){
       const img = new Image();
-      img.onerror = reject;
+      img.onerror = ()=> reject(new Error('formato'));
       img.onload = function(){
-        let w = img.width, h = img.height;
-        const escala = Math.min(1, MAX_LADO_FOTO / Math.max(w, h));
-        w = Math.round(w * escala); h = Math.round(h * escala);
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-
-        const stamp = fmtDate(new Date());
-        const fontSize = Math.max(13, Math.round(w/32));
-        ctx.font = `600 ${fontSize}px IBM Plex Mono, monospace`;
-        const padding = fontSize*0.6;
-        const textW = ctx.measureText(stamp).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(0, h-fontSize-padding*2, textW+padding*2, fontSize+padding*2);
-        ctx.fillStyle = '#fff';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(stamp, padding, h-fontSize/2-padding);
-
-        let q = CALIDAD_FOTO;
-        let dataUrl = canvas.toDataURL('image/jpeg', q);
-        while(dataUrl.length > MAX_BYTES_FOTO && q > 0.28){
-          q -= 0.08;
-          dataUrl = canvas.toDataURL('image/jpeg', q);
-        }
-        resolve({dataUrl: dataUrl, bytes: dataUrl.length});
+        try{ resolve(dibujarYComprimir(img, img.naturalWidth || img.width, img.naturalHeight || img.height)); }
+        catch(err){ reject(err); }
       };
       img.src = e.target.result;
     };
     reader.readAsDataURL(file);
   });
+}
+
+async function procesarImagen(file){
+  /* Plan A: createImageBitmap (rápido, respeta EXIF) */
+  if(typeof createImageBitmap === 'function'){
+    try{
+      let bmp;
+      try{ bmp = await createImageBitmap(file, {imageOrientation:'from-image'}); }
+      catch(e){ bmp = await createImageBitmap(file); }
+      const res = dibujarYComprimir(bmp, bmp.width, bmp.height);
+      if(bmp.close) bmp.close();
+      return res;
+    }catch(e){
+      console.warn('createImageBitmap falló, usando <img>:', e);
+    }
+  }
+  return await procesarConImg(file);
+}
+
+function esFormatoNoSoportado(file){
+  const n = (file.name || '').toLowerCase();
+  const t = (file.type || '').toLowerCase();
+  return n.endsWith('.heic') || n.endsWith('.heif') || t.indexOf('heic') > -1 || t.indexOf('heif') > -1;
 }
 
 /* ---------------- ROLE ---------------- */
@@ -752,14 +787,14 @@ function renderNuevo(){
             <div class="photo-box" id="boxGrifo" onclick="document.getElementById('inputGrifo').click()">
               <span>Toca para tomar / subir foto</span>
             </div>
-            <input type="file" id="inputGrifo" accept="image/*" capture="environment" style="display:none" onchange="handlePhoto(event,'grifo')">
+            <input type="file" id="inputGrifo" accept="image/*,.heic,.heif" capture="environment" style="display:none" onchange="handlePhoto(event,'grifo')">
           </div>
           <div class="field">
             <label>Fotografía del hallazgo</label>
             <div class="photo-box" id="boxHallazgo" onclick="document.getElementById('inputHallazgo').click()">
               <span>Toca para tomar / subir foto</span>
             </div>
-            <input type="file" id="inputHallazgo" accept="image/*" capture="environment" style="display:none" onchange="handlePhoto(event,'hallazgo')">
+            <input type="file" id="inputHallazgo" accept="image/*,.heic,.heif" capture="environment" style="display:none" onchange="handlePhoto(event,'hallazgo')">
           </div>
         </div>
 
@@ -954,15 +989,21 @@ async function handlePhoto(evt, tipo){
   const file = evt.target.files[0];
   if(!file) return;
   const box = document.getElementById(tipo==='grifo'?'boxGrifo':'boxHallazgo');
+  const vacio = '<span>Toca para tomar / subir foto</span>';
   if(box) box.innerHTML = '<span>Procesando foto…</span>';
   try{
     const res = await procesarImagen(file);
     pendingFotos[tipo] = res;
     if(box) box.innerHTML = `<img src="${res.dataUrl}">`;
   }catch(e){
-    console.error(e);
-    toast('No se pudo procesar la fotografía');
-    if(box) box.innerHTML = '<span>Toca para tomar / subir foto</span>';
+    console.error('Error al procesar la foto:', file.name, file.type, file.size, e);
+    if(esFormatoNoSoportado(file)){
+      toast('Formato HEIC no compatible. En el iPhone: Ajustes → Cámara → Formatos → "Más compatible" (JPG).');
+    }else{
+      toast('No se pudo procesar la fotografía (' + (file.type || 'formato desconocido') + ').');
+    }
+    if(box) box.innerHTML = vacio;
+    evt.target.value = '';
   }
 }
 
@@ -1102,7 +1143,7 @@ function openDetail(id){
         <div class="photo-box" id="boxRespaldo" onclick="document.getElementById('inputRespaldo').click()">
           ${h.foto_respaldo ? `<img src="${h.foto_respaldo}">` : '<span>Toca para tomar / subir foto de respaldo</span>'}
         </div>
-        <input type="file" id="inputRespaldo" accept="image/*" capture="environment" style="display:none" onchange="handlePhotoRespaldo(event)">
+        <input type="file" id="inputRespaldo" accept="image/*,.heic,.heif" capture="environment" style="display:none" onchange="handlePhotoRespaldo(event)">
         <small>Evidencia de que el hallazgo fue resuelto en terreno.</small>
       </div>
       <div class="field">
@@ -1139,9 +1180,14 @@ async function handlePhotoRespaldo(evt){
     pendingRespaldo = res;
     if(box) box.innerHTML = `<img src="${res.dataUrl}">`;
   }catch(e){
-    console.error(e);
-    toast('No se pudo procesar la fotografía');
+    console.error('Error al procesar la foto de respaldo:', file.name, file.type, file.size, e);
+    if(esFormatoNoSoportado(file)){
+      toast('Formato HEIC no compatible. En el iPhone: Ajustes → Cámara → Formatos → "Más compatible" (JPG).');
+    }else{
+      toast('No se pudo procesar la fotografía (' + (file.type || 'formato desconocido') + ').');
+    }
     if(box) box.innerHTML = '<span>Toca para tomar / subir foto de respaldo</span>';
+    evt.target.value = '';
   }
 }
 
