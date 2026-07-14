@@ -1141,6 +1141,20 @@ function openDetail(id){
       <strong>${CATEGORIA_LABEL[h.categoria]||h.categoria||'—'}</strong> → ${h.tipo_hallazgo}
     </div>` : ''}
 
+    <div class="panel" style="margin-bottom:14px;">
+      <h3>Grifo</h3>
+      <div class="detail-grid">
+        <div class="dg"><span>Código de grifo</span><span>${h.codigoGrifo || '<span style="color:#C8334D">no asociado al catálogo</span>'}</span></div>
+        <div class="dg"><span>Comuna</span><span>${h.comuna || '—'}</span></div>
+        <div class="dg"><span>Empresa</span><span>${h.empresa || '—'}</span></div>
+        <div class="dg"><span>Modelo</span><span>${h.modelo || '—'}</span></div>
+        <div class="dg"><span>Presión (m)</span><span>${h.presion != null ? h.presion : '—'}</span></div>
+        <div class="dg"><span>Zona de riesgo</span><span>${h.zona_riesgo != null ? h.zona_riesgo : '—'}</span></div>
+        <div class="dg"><span>Coordenadas</span><span>${h.lat ? Number(h.lat).toFixed(6) + ', ' + Number(h.lng).toFixed(6) : '—'}</span></div>
+        ${h.origen_inspeccion ? `<div class="dg"><span>Origen</span><span>Inspección PR036 · período ${String(h.origen_inspeccion).split('_')[0]}</span></div>` : ''}
+      </div>
+    </div>
+
     <div class="detail-imgs">
       <figure>${h.foto_grifo?`<img src="${h.foto_grifo}">`:'<div style="background:var(--concrete-2);height:140px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-soft);font-size:12px;">Sin foto</div>'}<figcaption>Fotografía del grifo</figcaption></figure>
       <figure>${h.foto_hallazgo?`<img src="${h.foto_hallazgo}">`:'<div style="background:var(--concrete-2);height:140px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-soft);font-size:12px;">Sin foto</div>'}<figcaption>Fotografía del hallazgo</figcaption></figure>
