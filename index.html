@@ -10,6 +10,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -166,6 +167,27 @@ main{flex:1;overflow-y:auto;padding:24px 28px 60px;}
 .fcard .factions{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
 .empty{padding:40px 20px;text-align:center;color:var(--text-soft);}
 .empty .display{font-size:18px;color:var(--ink);margin-bottom:6px;}
+
+/* TABLA INSPECCIONES */
+.tbl-wrap{overflow-x:auto;}
+table.insp{width:100%;border-collapse:collapse;font-size:12.5px;}
+table.insp th{text-align:left;padding:9px 10px;background:#f3f0e8;color:var(--ink);font-size:11px;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--line);white-space:nowrap;}
+table.insp td{padding:9px 10px;border-bottom:1px solid #eee7db;vertical-align:middle;}
+table.insp tr:hover td{background:#faf8f3;}
+table.insp .mono{font-family:'IBM Plex Mono',monospace;font-size:11.5px;}
+.sev-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;}
+.filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
+.filters select,.filters input{padding:8px 10px;border:1.5px solid var(--line);border-radius:7px;font-size:13px;font-family:'IBM Plex Sans',sans-serif;background:#fff;color:var(--text);}
+.dl-zone{border:2px dashed var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--text-soft);font-size:13px;background:#fbf9f4;margin-bottom:16px;}
+.dl-zone strong{color:var(--ink);}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 18px;font-size:12.5px;}
+.detail-grid .dg{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dotted #e6dfd0;padding:5px 0;}
+.detail-grid .dg span:first-child{color:var(--text-soft);}
+.detail-grid .dg span:last-child{font-weight:600;text-align:right;}
+.obs-item{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-radius:7px;margin-bottom:6px;font-size:13px;}
+.obs-inmediato{background:#fdecef;}
+.obs-corto{background:#fdf3e1;}
+.obs-mediano{background:#fdfae1;}
 
 /* MODAL */
 .modal-bg{position:fixed;inset:0;background:rgba(22,50,58,.55);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px;}
@@ -373,6 +395,7 @@ if(firebaseReady){
       <button class="navbtn active" data-page="dashboard" onclick="goPage('dashboard')">Tablero ejecutivo</button>
       <button class="navbtn" data-page="nuevo" id="navNuevo" onclick="goPage('nuevo')">Nuevo hallazgo</button>
       <button class="navbtn" data-page="lista" onclick="goPage('lista')">Hallazgos</button>
+      <button class="navbtn" data-page="inspecciones" onclick="goPage('inspecciones')">Inspecciones PR036</button>
       <div class="rail-foot" id="railFoot">v1.0 · datos compartidos<br>entre ambas empresas</div>
     </nav>
 
@@ -636,6 +659,7 @@ function render(){
   if(currentPage==='dashboard') renderDashboard();
   else if(currentPage==='nuevo') renderNuevo();
   else if(currentPage==='lista') renderLista();
+  else if(currentPage==='inspecciones') renderInspecciones();
 }
 
 /* ================= DASHBOARD ================= */
@@ -1483,6 +1507,481 @@ new Chart(document.getElementById('repChart2'), {type:'bar',
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
   toast('Informe ejecutivo descargado');
+}
+
+
+/* ====================================================================
+   INSPECCIONES PR036
+   Carga de los archivos "Inspeccion Grifos_AAAAMM<EMPRESA>.xlsx"
+   (formato SISS de 37 columnas). Se guardan en Firestore, colección
+   'inspecciones', con id = periodo_codigoGrifo, de modo que volver a
+   cargar el mismo archivo actualiza y no duplica.
+   La severidad se deduce del color en COMENTARIOS:
+     🔴 Operatividad directa · 🟠 Operat. indirecta / Mecánica · 🟡 Señalética
+   ==================================================================== */
+const COL_INSP = 'inspecciones';
+let INSPECCIONES = [];
+let inspCargadas = false;
+let inspMap = null;
+let inspFiltros = {periodo:'', comuna:'', severidad:'', texto:''};
+
+const COLUMNAS_PR036 = ['codigoProceso','codigoArchivo','rut','periodo','codigoLocalidad','codigoComuna',
+  'codigoGrifo','fechaInspeccion','OrdenIntervencion','FechaUltIntervencion','ZonaRiesgo','OtraZonaRiesgo',
+  'Modelo','DiametroNominal','DiametroConexion','AnioInstalacion','Color','EstadoPintura','LineaNegra',
+  'NumSobreLinea','AnilloVerde','Presion','HoraMedicion','CumplePresion','CumpleCaudal','EstadoVastagoRoda',
+  'EstadoVastagoTor','OperaVastago','TapaBoca','TapaBocaEstado','BocaHiloEstado','ValvulaPieCamara',
+  'ValvulaPieTapa','ValvulaPieEstado','ValvulaPieOperativa','FugaAgua','COMENTARIOS'];
+
+const SEV_COLOR  = {inmediato:'#C8334D', corto:'#E2A33D', mediano:'#E7C948', ok:'#5F8D6B'};
+const SEV_LABEL  = {inmediato:'Operatividad directa', corto:'Operat. indirecta / Mecánica',
+                    mediano:'Señalética / Visibilidad', ok:'Sin observaciones'};
+const EMOJI_SEV  = {'🔴':'inmediato', '🟠':'corto', '🟡':'mediano'};
+
+function fmtFechaCorta(v){
+  if(!v) return '—';
+  const d = new Date(v);
+  if(isNaN(d)) return String(v).slice(0,10);
+  return d.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric'});
+}
+
+/* Extrae las observaciones desde el campo COMENTARIOS */
+function parsearObservaciones(txt){
+  const obs = [];
+  if(!txt) return obs;
+  String(txt).split(/\r?\n/).forEach(linea=>{
+    const t = linea.trim();
+    if(!t || t.length < 3) return;
+    let sev = null, texto = t;
+    for(const e in EMOJI_SEV){
+      if(t.indexOf(e) === 0){ sev = EMOJI_SEV[e]; texto = t.slice(e.length).trim(); break; }
+    }
+    if(!sev){ sev = 'mediano'; }
+    obs.push({severidad: sev, texto: texto});
+  });
+  return obs;
+}
+
+function severidadDe(obs){
+  if(!obs || !obs.length) return 'ok';
+  if(obs.some(o=>o.severidad==='inmediato')) return 'inmediato';
+  if(obs.some(o=>o.severidad==='corto')) return 'corto';
+  return 'mediano';
+}
+
+/* ---------------- CARGA DEL EXCEL ---------------- */
+async function handleExcelPR036(evt){
+  const file = evt.target.files[0];
+  if(!file) return;
+  const info = document.getElementById('inspInfo');
+  const set = m => { if(info) info.innerHTML = m; };
+  set('Leyendo <strong>' + file.name + '</strong>…');
+
+  try{
+    const buf = await file.arrayBuffer();
+    const wb  = XLSX.read(buf, {type:'array', cellDates:true});
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const filas = XLSX.utils.sheet_to_json(ws, {defval:null, raw:false});
+    if(!filas.length) throw new Error('El archivo no tiene filas de datos.');
+    if(!('codigoGrifo' in filas[0]) || !('periodo' in filas[0])){
+      throw new Error('No se reconoce el formato PR036 (faltan las columnas codigoGrifo / periodo).');
+    }
+
+    const empresaArchivo = (file.name.match(/SA[LM]/i) || ['—'])[0].toUpperCase();
+    const registros = [];
+    let sinCatalogo = 0;
+
+    filas.forEach(f=>{
+      const cod = String(f.codigoGrifo || '').trim();
+      if(!cod) return;
+      const per = String(f.periodo || '').trim();
+      const g   = CATALOGO_GRIFOS.find(x => x.codigoGrifo.toUpperCase() === cod.toUpperCase());
+      if(!g) sinCatalogo++;
+
+      const datos = {};
+      COLUMNAS_PR036.forEach(c=>{
+        let v = f[c];
+        if(v instanceof Date) v = v.toISOString().slice(0,10);
+        datos[c] = (v === undefined || v === null || v === '') ? null : String(v);
+      });
+
+      const obs = parsearObservaciones(f.COMENTARIOS);
+      registros.push({
+        id: per + '_' + cod.toUpperCase(),
+        periodo: per,
+        empresa: empresaArchivo,
+        codigoGrifo: cod,
+        codigoComuna: String(f.codigoComuna || ''),
+        comuna: g ? g.comuna : null,
+        direccion: g ? g.Ubicacion : null,
+        lat: g ? g.lat : null,
+        lng: g ? g.lng : null,
+        enCatalogo: !!g,
+        fechaInspeccion: datos.fechaInspeccion,
+        observaciones: obs,
+        severidad: severidadDe(obs),
+        datos: datos,
+        archivo: file.name,
+        cargado_por: ROLE === 'sacyr' ? 'Sacyr Aguas' : 'Singemelec',
+        fecha_carga: new Date().toISOString()
+      });
+    });
+
+    set('Guardando <strong>' + registros.length + '</strong> inspecciones en la base compartida…');
+    await guardarInspecciones(registros);
+
+    const conObs = registros.filter(r=>r.severidad !== 'ok').length;
+    set('✔ <strong>' + registros.length + '</strong> inspecciones cargadas (' + empresaArchivo +
+        ' · período ' + registros[0].periodo + ') · <strong>' + conObs + '</strong> con observaciones' +
+        (sinCatalogo ? ' · <span style="color:#C8334D;">' + sinCatalogo + ' sin ubicación en el catálogo</span>' : ''));
+    toast(registros.length + ' inspecciones cargadas');
+    evt.target.value = '';
+    await cargarInspecciones(true);
+    renderInspecciones();
+  }catch(e){
+    console.error(e);
+    set('<span style="color:#C8334D;">No se pudo procesar el archivo: ' + (e.message || e) + '</span>');
+    toast('Error al leer el archivo');
+    evt.target.value = '';
+  }
+}
+
+async function guardarInspecciones(registros){
+  if(!(STORAGE_MODE === 'remote' && firebaseReady)){
+    INSPECCIONES = INSPECCIONES.filter(i => !registros.some(r=>r.id===i.id)).concat(registros);
+    try{ localStorage.setItem('grifos_inspecciones_local', JSON.stringify(INSPECCIONES)); }catch(e){}
+    return;
+  }
+  for(let i=0; i<registros.length; i+=400){
+    const chunk = registros.slice(i, i+400);
+    const batch = db.batch();
+    chunk.forEach(r=>{
+      const data = Object.assign({}, r);
+      delete data.id;
+      batch.set(db.collection(COL_INSP).doc(r.id), data);
+    });
+    await batch.commit();
+  }
+}
+
+async function cargarInspecciones(forzar){
+  if(inspCargadas && !forzar) return;
+  if(!(STORAGE_MODE === 'remote' && firebaseReady)){
+    try{ INSPECCIONES = JSON.parse(localStorage.getItem('grifos_inspecciones_local') || '[]'); }
+    catch(e){ INSPECCIONES = []; }
+    inspCargadas = true;
+    return;
+  }
+  try{
+    const snap = await db.collection(COL_INSP).get();
+    INSPECCIONES = snap.docs.map(d=>Object.assign({id:d.id}, d.data()));
+    inspCargadas = true;
+  }catch(e){
+    console.error(e);
+    toast('No se pudieron cargar las inspecciones');
+  }
+}
+
+/* ---------------- VISTA ---------------- */
+function inspFiltradas(){
+  const f = inspFiltros;
+  const q = (f.texto || '').toLowerCase();
+  return INSPECCIONES.filter(i=>{
+    if(f.periodo && i.periodo !== f.periodo) return false;
+    if(f.comuna && i.comuna !== f.comuna) return false;
+    if(f.severidad === 'conobs' && i.severidad === 'ok') return false;
+    if(f.severidad && f.severidad !== 'conobs' && i.severidad !== f.severidad) return false;
+    if(q){
+      const blob = (i.codigoGrifo + ' ' + (i.direccion||'') + ' ' + (i.comuna||'') + ' ' +
+                    (i.observaciones||[]).map(o=>o.texto).join(' ')).toLowerCase();
+      if(blob.indexOf(q) === -1) return false;
+    }
+    return true;
+  });
+}
+
+async function renderInspecciones(){
+  const main = document.getElementById('main');
+  if(!inspCargadas){
+    main.innerHTML = '<div class="loading">Cargando inspecciones…</div>';
+    await cargarInspecciones();
+  }
+
+  const puedeCargar = (ROLE === 'singemelec');
+  const datos = inspFiltradas();
+  const c = {inmediato:0, corto:0, mediano:0, ok:0};
+  datos.forEach(i=> c[i.severidad] = (c[i.severidad]||0)+1);
+  const conObs = datos.length - c.ok;
+
+  const periodos = [...new Set(INSPECCIONES.map(i=>i.periodo))].sort().reverse();
+  const comunas  = [...new Set(INSPECCIONES.map(i=>i.comuna).filter(Boolean))].sort();
+
+  const zonaCarga = puedeCargar ? `
+    <div class="dl-zone">
+      <div style="margin-bottom:10px;">Carga el archivo <strong>Inspeccion Grifos_AAAAMM&lt;SAL|SAM&gt;.xlsx</strong> (formato PR036, 37 columnas).<br>
+      Volver a cargar el mismo período <strong>actualiza</strong> los registros, no los duplica.</div>
+      <input type="file" id="inputPR036" accept=".xlsx,.xls" style="display:none" onchange="handleExcelPR036(event)">
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('inputPR036').click()">Cargar Excel PR036</button>
+      <div id="inspInfo" style="margin-top:10px;font-size:12.5px;"></div>
+    </div>` : '';
+
+  if(!INSPECCIONES.length){
+    main.innerHTML = `<div class="page">
+      <div class="page-head"><div><h1>Inspecciones PR036</h1>
+      <p>Resumen mensual de inspecciones y observaciones reportadas a la SISS</p></div></div>
+      ${zonaCarga}
+      <div class="empty"><div class="display">Aún no hay inspecciones cargadas</div>
+      ${puedeCargar ? 'Carga el Excel PR036 del período para verlas en el mapa y consultar su detalle.'
+                    : 'Singemelec aún no ha cargado el archivo del período.'}</div></div>`;
+    return;
+  }
+
+  main.innerHTML = `<div class="page">
+    <div class="page-head">
+      <div><h1>Inspecciones PR036</h1>
+      <p>${INSPECCIONES.length} inspecciones cargadas · períodos: ${periodos.join(', ')}</p></div>
+      <button class="btn btn-ghost btn-sm" onclick="descargarObservacionesCSV()">Descargar observaciones (CSV)</button>
+    </div>
+    ${zonaCarga}
+
+    <div class="kpi-row">
+      <div class="kpi"><div class="tab" style="background:var(--ink)"></div><div class="num">${datos.length}</div><div class="lbl">Grifos inspeccionados</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--hidrante)"></div><div class="num">${c.inmediato}</div><div class="lbl">Operatividad directa</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--senal)"></div><div class="num">${c.corto}</div><div class="lbl">Operat. indirecta / Mecánica</div></div>
+      <div class="kpi"><div class="tab" style="background:#E7C948"></div><div class="num">${c.mediano}</div><div class="lbl">Señalética / Visibilidad</div></div>
+      <div class="kpi"><div class="tab" style="background:var(--musgo)"></div><div class="num">${c.ok}</div><div class="lbl">Sin observaciones</div></div>
+    </div>
+
+    <div class="panel">
+      <h3>Mapa de inspecciones — ${conObs} con observación</h3>
+      <div id="inspMap" style="height:420px;border-radius:8px;"></div>
+      <div class="legend" style="margin-top:10px;">
+        <span><i style="background:#C8334D"></i>Operatividad directa</span>
+        <span><i style="background:#E2A33D"></i>Operat. indirecta / Mecánica</span>
+        <span><i style="background:#E7C948"></i>Señalética / Visibilidad</span>
+        <span><i style="background:#5F8D6B"></i>Sin observaciones</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Detalle de inspecciones</h3>
+      <div class="filters">
+        <select id="fPeriodo" onchange="setFiltroInsp('periodo', this.value)">
+          <option value="">Todos los períodos</option>
+          ${periodos.map(p=>`<option value="${p}" ${inspFiltros.periodo===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+        <select id="fComuna" onchange="setFiltroInsp('comuna', this.value)">
+          <option value="">Todas las comunas</option>
+          ${comunas.map(x=>`<option value="${x}" ${inspFiltros.comuna===x?'selected':''}>${x}</option>`).join('')}
+        </select>
+        <select id="fSev" onchange="setFiltroInsp('severidad', this.value)">
+          <option value="">Todas</option>
+          <option value="conobs" ${inspFiltros.severidad==='conobs'?'selected':''}>Solo con observación</option>
+          <option value="inmediato" ${inspFiltros.severidad==='inmediato'?'selected':''}>Operatividad directa</option>
+          <option value="corto" ${inspFiltros.severidad==='corto'?'selected':''}>Operat. indirecta / Mecánica</option>
+          <option value="mediano" ${inspFiltros.severidad==='mediano'?'selected':''}>Señalética / Visibilidad</option>
+          <option value="ok" ${inspFiltros.severidad==='ok'?'selected':''}>Sin observaciones</option>
+        </select>
+        <input type="text" id="fTexto" placeholder="Buscar código, dirección u observación…" value="${inspFiltros.texto||''}"
+               oninput="setFiltroInsp('texto', this.value)" style="min-width:250px;flex:1;">
+      </div>
+      <div class="tbl-wrap">
+        <table class="insp">
+          <thead><tr>
+            <th>Código</th><th>Comuna</th><th>Dirección</th><th>Inspección</th>
+            <th>Presión</th><th>Observaciones</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${datos.slice(0,300).map(i=>`
+              <tr>
+                <td class="mono"><span class="sev-dot" style="background:${SEV_COLOR[i.severidad]}"></span>${i.codigoGrifo}</td>
+                <td>${i.comuna || '<span style="color:#C8334D">sin catálogo</span>'}</td>
+                <td>${(i.direccion || '—')}</td>
+                <td class="mono">${fmtFechaCorta(i.fechaInspeccion)}</td>
+                <td class="mono">${i.datos && i.datos.Presion ? i.datos.Presion + ' m' : '—'}</td>
+                <td>${i.observaciones && i.observaciones.length
+                        ? i.observaciones.map(o=>`<div style="margin:1px 0;"><span class="badge ${o.severidad}">${o.texto}</span></div>`).join('')
+                        : '<span style="color:var(--text-soft)">—</span>'}</td>
+                <td><button class="btn btn-ghost btn-sm" onclick="verInspeccion('${i.id}')">Ver</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${datos.length > 300 ? `<p style="font-size:12px;color:var(--text-soft);margin-top:10px;">Mostrando las primeras 300 de ${datos.length}. Usa los filtros para acotar.</p>` : ''}
+    </div>
+  </div>`;
+
+  /* mapa */
+  if(inspMap){ inspMap.remove(); inspMap = null; }
+  const conCoords = datos.filter(i=>i.lat && i.lng);
+  const centro = conCoords.length ? [conCoords[0].lat, conCoords[0].lng] : [-33.2518,-70.6908];
+  inspMap = L.map('inspMap').setView(centro, conCoords.length ? 11 : 10);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(inspMap);
+  conCoords.forEach(i=>{
+    const conObs = i.severidad !== 'ok';
+    L.circleMarker([i.lat,i.lng], {
+      radius: conObs ? 9 : 5,
+      color:'#fff', weight: conObs ? 2.5 : 1,
+      fillColor: SEV_COLOR[i.severidad], fillOpacity: conObs ? 1 : .75
+    }).addTo(inspMap)
+      .bindPopup(`<strong>${i.codigoGrifo}</strong><br>${i.direccion||''}<br>
+        <small>${i.comuna||''} · ${fmtFechaCorta(i.fechaInspeccion)}</small><br>
+        ${(i.observaciones||[]).map(o=>o.texto).join('<br>') || '<em>Sin observaciones</em>'}<br>
+        <a href="#" onclick="verInspeccion('${i.id}');return false;">Ver detalle</a>`);
+  });
+  if(conCoords.length > 1){
+    inspMap.fitBounds(conCoords.map(i=>[i.lat,i.lng]), {padding:[30,30], maxZoom:14});
+  }
+}
+
+function setFiltroInsp(campo, valor){
+  inspFiltros[campo] = valor;
+  const foco = campo === 'texto';
+  renderInspecciones().then(()=>{
+    if(foco){
+      const el = document.getElementById('fTexto');
+      if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    }
+  });
+}
+
+/* ---------------- DETALLE ---------------- */
+const ETIQUETA_SI_NO = {'1':'Sí','2':'No'};
+const CAMPOS_DETALLE = [
+  ['Modelo','Modelo'], ['DiametroNominal','Diámetro nominal (mm)'], ['DiametroConexion','Diámetro conexión (mm)'],
+  ['AnioInstalacion','Año instalación'], ['Color','Color'], ['Presion','Presión (m)'], ['HoraMedicion','Hora medición'],
+  ['CumplePresion','Cumple presión'], ['CumpleCaudal','Cumple caudal'], ['FugaAgua','Fuga de agua'],
+  ['EstadoPintura','Estado pintura'], ['LineaNegra','Línea negra'], ['NumSobreLinea','N° sobre línea'],
+  ['AnilloVerde','Anillo verde'], ['EstadoVastagoRoda','Vástago — rodadura'], ['EstadoVastagoTor','Vástago — torque'],
+  ['OperaVastago','Opera vástago'], ['TapaBoca','Tapa boca'], ['TapaBocaEstado','Estado tapa boca'],
+  ['BocaHiloEstado','Estado boca hilo'], ['ValvulaPieCamara','Válvula pie — cámara'], ['ValvulaPieTapa','Válvula pie — tapa'],
+  ['ValvulaPieEstado','Válvula pie — estado'], ['ValvulaPieOperativa','Válvula pie operativa'],
+  ['ZonaRiesgo','Zona de riesgo'], ['OrdenIntervencion','Orden intervención'], ['FechaUltIntervencion','Última intervención'],
+  ['rut','RUT sanitaria'], ['codigoLocalidad','Cód. localidad'], ['codigoComuna','Cód. comuna']
+];
+const CAMPOS_SI_NO = ['CumplePresion','CumpleCaudal','FugaAgua','LineaNegra','AnilloVerde','OperaVastago',
+  'TapaBoca','ValvulaPieOperativa','ValvulaPieCamara','ValvulaPieTapa'];
+
+function valorDetalle(k, v){
+  if(v === null || v === undefined || v === '') return '—';
+  if(CAMPOS_SI_NO.indexOf(k) > -1 && ETIQUETA_SI_NO[v]) return ETIQUETA_SI_NO[v] + ' (' + v + ')';
+  if(k === 'EstadoPintura') return (v === '1' ? 'Bueno' : v === '2' ? 'Deficiente' : v) + ' (' + v + ')';
+  if(k.indexOf('Fecha') === 0 || k === 'FechaUltIntervencion') return fmtFechaCorta(v);
+  return v;
+}
+
+function verInspeccion(id){
+  const i = INSPECCIONES.find(x=>x.id===id);
+  if(!i) return;
+  const d = i.datos || {};
+  const yaHallazgo = HALLAZGOS.some(h=>h.origen_inspeccion === i.id);
+
+  document.getElementById('modalContent').innerHTML = `
+    <button class="closeX" onclick="closeModal()">✕</button>
+    <h2>${i.codigoGrifo} <span class="badge ${i.severidad==='ok'?'resuelto':i.severidad}" style="vertical-align:middle;margin-left:6px;">${SEV_LABEL[i.severidad]}</span></h2>
+    <p style="color:var(--text-soft);font-size:13px;margin:2px 0 14px;">
+      ${i.direccion || 'Sin dirección en catálogo'} · ${i.comuna || '—'}<br>
+      Período <strong>${i.periodo}</strong> · Empresa ${i.empresa} · Inspección ${fmtFechaCorta(i.fechaInspeccion)}
+    </p>
+
+    ${i.observaciones && i.observaciones.length ? `
+      <div class="panel" style="margin-bottom:14px;">
+        <h3>Observaciones del inspector</h3>
+        ${i.observaciones.map(o=>`
+          <div class="obs-item obs-${o.severidad}">
+            <span class="sev-dot" style="background:${SEV_COLOR[o.severidad]};margin-top:5px;"></span>
+            <div><strong>${o.texto}</strong><br>
+            <small style="color:var(--text-soft)">${SEV_LABEL[o.severidad]}</small></div>
+          </div>`).join('')}
+      </div>` : '<div class="panel" style="margin-bottom:14px;"><h3>Observaciones</h3><p style="font-size:13px;color:var(--text-soft);margin:0;">El inspector no registró observaciones para este grifo.</p></div>'}
+
+    ${i.lat && i.lng ? '<div id="inspDetailMap" style="height:200px;border-radius:8px;margin-bottom:14px;"></div>' : ''}
+
+    <div class="panel">
+      <h3>Ficha técnica PR036</h3>
+      <div class="detail-grid">
+        ${CAMPOS_DETALLE.map(([k,lbl])=>`<div class="dg"><span>${lbl}</span><span>${valorDetalle(k, d[k])}</span></div>`).join('')}
+      </div>
+      <p style="font-size:11px;color:var(--text-soft);margin-top:10px;">Codificación del archivo PR036: 1 = Sí / Bueno · 2 = No / Deficiente.</p>
+    </div>
+
+    ${i.severidad !== 'ok' ? `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+        ${yaHallazgo
+          ? '<span class="badge en_proceso">Ya existe un hallazgo creado desde esta inspección</span>'
+          : (ROLE === 'singemelec'
+              ? `<button class="btn btn-primary btn-sm" onclick="promoverAHallazgo('${i.id}')">Crear hallazgo desde esta inspección</button>`
+              : '')}
+      </div>` : ''}
+  `;
+  document.getElementById('modalBg').classList.add('open');
+
+  if(i.lat && i.lng){
+    setTimeout(()=>{
+      const m = L.map('inspDetailMap').setView([i.lat,i.lng], 17);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(m);
+      L.circleMarker([i.lat,i.lng],{radius:10,color:'#fff',weight:2.5,fillColor:SEV_COLOR[i.severidad],fillOpacity:1}).addTo(m);
+      m.invalidateSize();
+    }, 60);
+  }
+}
+
+/* ---------------- PROMOVER A HALLAZGO ---------------- */
+async function promoverAHallazgo(id){
+  const i = INSPECCIONES.find(x=>x.id===id);
+  if(!i) return;
+  if(!i.lat || !i.lng){ toast('Este grifo no tiene ubicación en el catálogo; no se puede georreferenciar.'); return; }
+  const g = CATALOGO_GRIFOS.find(x=>x.codigoGrifo.toUpperCase() === i.codigoGrifo.toUpperCase()) || {};
+  const d = i.datos || {};
+
+  const nuevo = {
+    id: uid(),
+    fecha_creacion: new Date().toISOString(),
+    creado_por: 'Singemelec (PR036 ' + i.periodo + ')',
+    origen_inspeccion: i.id,
+    codigoGrifo: i.codigoGrifo,
+    empresa: g.empresa || i.empresa || null,
+    modelo: d.Modelo || g.Modelo || null,
+    comuna: i.comuna || null,
+    zona_riesgo: d.ZonaRiesgo != null ? Number(d.ZonaRiesgo) : null,
+    presion: d.Presion != null ? Number(d.Presion) : null,
+    categoria: 'grifo',
+    tipo_hallazgo: (i.observaciones[0] && i.observaciones[0].texto) || 'Observación PR036',
+    direccion: i.direccion || 'Sin dirección registrada',
+    lat: i.lat, lng: i.lng,
+    ideal_lat: null, ideal_lng: null,
+    foto_grifo: null, foto_hallazgo: null, foto_respaldo: null,
+    descripcion: 'Observaciones del inspector (PR036 · ' + i.periodo + '):\n' +
+                 i.observaciones.map(o=>'• ' + o.texto + ' [' + SEV_LABEL[o.severidad] + ']').join('\n'),
+    prioridad: i.severidad,
+    estado: 'pendiente',
+    comentarios: []
+  };
+
+  await persistirHallazgo(nuevo);
+  toast('Hallazgo creado desde la inspección ' + i.codigoGrifo);
+  closeModal();
+  goPage('lista');
+}
+
+/* ---------------- EXPORTAR ---------------- */
+function descargarObservacionesCSV(){
+  const datos = inspFiltradas().filter(i=>i.severidad !== 'ok');
+  if(!datos.length){ toast('No hay observaciones que exportar con los filtros actuales'); return; }
+  const esc = v => '"' + String(v == null ? '' : v).replace(/"/g,'""').replace(/\n/g,' / ') + '"';
+  const filas = [['periodo','empresa','codigoGrifo','comuna','direccion','lat','lng','fechaInspeccion','clasificacion','observacion'].join(',')];
+  datos.forEach(i=>{
+    i.observaciones.forEach(o=>{
+      filas.push([i.periodo, i.empresa, i.codigoGrifo, i.comuna, i.direccion, i.lat, i.lng,
+                  (i.fechaInspeccion||'').slice(0,10), SEV_LABEL[o.severidad], o.texto].map(esc).join(','));
+    });
+  });
+  const blob = new Blob(['﻿' + filas.join('\n')], {type:'text/csv;charset=utf-8;'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'observaciones_PR036.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  toast('CSV descargado');
 }
 
 /* ---------------- IMPORTAR CSV ---------------- */
