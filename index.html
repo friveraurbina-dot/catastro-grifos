@@ -909,6 +909,7 @@ const TIPOS_HALLAZGO = {
     'Cámara no ubicable'
   ],
   grifo: [
+    'Válvula de pie cerrada',
     'Vástago en mal estado',
     'Pérdida de agua',
     'Boquilla en mal estado',
@@ -1927,7 +1928,10 @@ async function renderInspecciones(){
     <div class="page-head">
       <div><h1>Inspecciones PR036</h1>
       <p>${INSPECCIONES.length} inspecciones cargadas · períodos: ${periodos.join(', ')}</p></div>
-      <button class="btn btn-ghost btn-sm" onclick="descargarObservacionesCSV()">Descargar observaciones (CSV)</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="descargarObservacionesCSV()">Descargar observaciones (CSV)</button>
+        ${puedeCargar ? '<button class="btn btn-ghost btn-sm" style="border-color:#e6b3bd;color:#C8334D;" onclick="abrirBorradoInspecciones()">Borrar inspecciones cargadas</button>' : ''}
+      </div>
     </div>
     ${zonaCarga}
 
@@ -2152,6 +2156,100 @@ async function promoverAHallazgo(id){
   toast('Hallazgo creado desde la inspección ' + i.codigoGrifo);
   closeModal();
   goPage('lista');
+}
+
+/* ---------------- BORRAR INSPECCIONES ---------------- */
+function abrirBorradoInspecciones(){
+  if(ROLE !== 'singemelec'){ toast('Solo Singemelec puede borrar inspecciones'); return; }
+  const grupos = {};
+  INSPECCIONES.forEach(i=>{
+    const k = i.periodo + '|' + (i.empresa || '—');
+    grupos[k] = (grupos[k] || 0) + 1;
+  });
+  const filas = Object.keys(grupos).sort().reverse();
+
+  document.getElementById('modalContent').innerHTML = `
+    <button class="closeX" onclick="closeModal()">✕</button>
+    <h2 style="color:#C8334D;">Borrar inspecciones</h2>
+    <p style="color:var(--text-soft);font-size:13px;margin:2px 0 16px;">
+      El borrado es <strong>permanente</strong> y afecta a las dos empresas. Los hallazgos creados a partir de estas inspecciones <strong>no</strong> se borran.
+    </p>
+
+    <div class="panel">
+      <h3>Borrar una carga específica</h3>
+      <div class="tbl-wrap">
+        <table class="insp">
+          <thead><tr><th>Período</th><th>Empresa</th><th>Registros</th><th></th></tr></thead>
+          <tbody>
+            ${filas.map(k=>{
+              const [per, emp] = k.split('|');
+              return `<tr>
+                <td class="mono">${per}</td>
+                <td class="mono">${emp}</td>
+                <td>${grupos[k]}</td>
+                <td><button class="btn btn-ghost btn-sm" style="border-color:#e6b3bd;color:#C8334D;"
+                    onclick="borrarInspecciones('${per}','${emp}')">Borrar estas ${grupos[k]}</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="border-color:#e6b3bd;">
+      <h3 style="color:#C8334D;">Borrar TODO (${INSPECCIONES.length} inspecciones)</h3>
+      <p style="font-size:12.5px;color:var(--text-soft);margin:0 0 10px;">
+        Para confirmar, escribe <strong>BORRAR</strong> y presiona el botón.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="text" id="confBorrado" placeholder="BORRAR" style="padding:8px 10px;border:1.5px solid var(--line);border-radius:7px;font-size:13px;width:130px;text-transform:uppercase;">
+        <button class="btn btn-ghost btn-sm" style="border-color:#C8334D;color:#C8334D;" onclick="borrarInspecciones(null,null,true)">Borrar todas las inspecciones</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('modalBg').classList.add('open');
+}
+
+async function borrarInspecciones(periodo, empresa, todo){
+  if(ROLE !== 'singemelec'){ toast('Solo Singemelec puede borrar inspecciones'); return; }
+
+  if(todo){
+    const conf = (document.getElementById('confBorrado') || {}).value || '';
+    if(conf.trim().toUpperCase() !== 'BORRAR'){
+      toast('Escribe BORRAR para confirmar el borrado total');
+      return;
+    }
+  }
+
+  const objetivo = todo
+    ? INSPECCIONES.slice()
+    : INSPECCIONES.filter(i => i.periodo === periodo && (i.empresa || '—') === empresa);
+
+  if(!objetivo.length){ toast('No hay registros que borrar'); return; }
+  if(!todo && !confirm('¿Borrar las ' + objetivo.length + ' inspecciones de ' + empresa + ' del período ' + periodo + '? Esta acción no se puede deshacer.')) return;
+
+  toast('Borrando ' + objetivo.length + ' inspecciones…');
+  try{
+    if(STORAGE_MODE === 'remote' && firebaseReady){
+      for(let i=0; i<objetivo.length; i+=400){
+        const chunk = objetivo.slice(i, i+400);
+        const batch = db.batch();
+        chunk.forEach(r=> batch.delete(db.collection(COL_INSP).doc(r.id)));
+        await batch.commit();
+      }
+    }else{
+      const ids = objetivo.map(o=>o.id);
+      INSPECCIONES = INSPECCIONES.filter(i=>ids.indexOf(i.id) === -1);
+      try{ localStorage.setItem('grifos_inspecciones_local', JSON.stringify(INSPECCIONES)); }catch(e){}
+    }
+    await cargarInspecciones(true);
+    closeModal();
+    toast(objetivo.length + ' inspecciones borradas');
+    renderInspecciones();
+  }catch(e){
+    console.error(e);
+    toast('No se pudieron borrar: ' + (e.message || e));
+  }
 }
 
 /* ---------------- EXPORTAR ---------------- */
